@@ -1,0 +1,31 @@
+# Environment & Credentials
+*.env
+*.env.*
+cookies.txt
+*.session
+*_sessions.json
+*token*.py
+*bot*.py
+wsa_backups*/
+*.backup.json
+
+# Binaries & Large Archives (>100MB GitHub limit)
+# Note: APKs can be distributed via GitHub Releases
+apks/*.apk
+!apks/README.md
+*.7z
+*.zip
+*.tar
+*.rar
+
+# Logs & Temporary Files
+*.log
+logs/
+temp/
+__pycache__/
+
+# OS & Editor Files
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

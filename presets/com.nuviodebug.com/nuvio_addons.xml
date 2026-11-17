@@ -1,0 +1,5 @@
+<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
+<map>
+    <string name="installed_manifest_urls_1">https://v3-cinemeta.strem.io/manifest.json</string>
+    <string name="installed_manifest_enabled_states_1">https://v3-cinemeta.strem.io/manifest.json&#9;true</string>
+</map>
