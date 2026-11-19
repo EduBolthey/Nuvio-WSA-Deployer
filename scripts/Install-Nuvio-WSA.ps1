@@ -42,19 +42,19 @@ function Test-Admin {
 if (-not (Test-Admin) -and -not $SkipElevation) {
     try {
         Write-Host "`n[*] Elevation required: Requesting Administrator privileges..." -ForegroundColor Yellow
-        $argList = "-NoProfile -ExecutionPolicy Bypass"
+        $argList = @("-NoProfile", "-ExecutionPolicy", "Bypass")
         if ($PSCommandPath) {
-            $argList += " -File `"$PSCommandPath`""
-            if ($ApkPath) { $argList += " -ApkPath `"$ApkPath`"" }
-            if ($WsaPath) { $argList += " -WsaPath `"$WsaPath`"" }
-            if ($PresetDir) { $argList += " -PresetDir `"$PresetDir`"" }
-            if ($SkipWsaInstall) { $argList += " -SkipWsaInstall" }
-            if ($SkipPresetConfig) { $argList += " -SkipPresetConfig" }
-            if ($NoRebootPrompt) { $argList += " -NoRebootPrompt" }
-            if ($NonInteractive) { $argList += " -NonInteractive" }
+            $argList += @("-File", $PSCommandPath)
+            if ($ApkPath) { $argList += @("-ApkPath", $ApkPath) }
+            if ($WsaPath) { $argList += @("-WsaPath", $WsaPath) }
+            if ($PresetDir) { $argList += @("-PresetDir", $PresetDir) }
+            if ($SkipWsaInstall) { $argList += "-SkipWsaInstall" }
+            if ($SkipPresetConfig) { $argList += "-SkipPresetConfig" }
+            if ($NoRebootPrompt) { $argList += "-NoRebootPrompt" }
+            if ($NonInteractive) { $argList += "-NonInteractive" }
         } else {
             $oneLiner = "irm https://raw.githubusercontent.com/EduBolthey/Nuvio-WSA-Deployer/main/scripts/Install-Nuvio-WSA.ps1 | iex"
-            $argList += " -Command `"$oneLiner`""
+            $argList += @("-Command", $oneLiner)
         }
 
         Start-Process powershell.exe -Verb RunAs -ArgumentList $argList
@@ -282,7 +282,7 @@ if ($wsaPackage) {
         "$PSScriptRoot\WSA",
         "$PSScriptRoot\..\WSA",
         "$env:ProgramFiles\WindowsSubsystemForAndroid",
-        "C:\WSA"
+        "$env:SystemDrive\WSA"
     )
 
     $wsaDir = $null
@@ -298,7 +298,7 @@ if ($wsaPackage) {
         $archives = @(
             Get-ChildItem -Path "$PSScriptRoot" -Filter "*WSA*.7z" -ErrorAction SilentlyContinue,
             Get-ChildItem -Path "$PSScriptRoot\.." -Filter "*WSA*.7z" -ErrorAction SilentlyContinue,
-            Get-ChildItem -Path "C:\WSA" -Filter "*.7z" -ErrorAction SilentlyContinue
+            Get-ChildItem -Path "$env:SystemDrive\WSA" -Filter "*.7z" -ErrorAction SilentlyContinue
         ) | Select-Object -ExpandProperty FullName -First 1
 
         if ($archives -and (Test-Path $archives)) {
