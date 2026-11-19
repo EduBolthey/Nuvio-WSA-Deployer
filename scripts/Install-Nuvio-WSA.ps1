@@ -473,7 +473,33 @@ function Invoke-NuvioWsaDeployer {
                 if ($apkAsset) {
                     $downloadTarget = "$env:TEMP\$($apkAsset.name)"
                     Write-Info "Downloading $($apkAsset.name) from $repo..."
-                    Invoke-WebRequest -Uri $apkAsset.browser_download_url -OutFile $downloadTarget -UseBasicParsing
+                    $downloadSuccess = $false
+                    if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                        try {
+                            & curl.exe -L -k --progress-bar -o "$downloadTarget" "$($apkAsset.browser_download_url)"
+                            if ((Test-Path $downloadTarget) -and (Get-Item $downloadTarget).Length -gt 10MB) {
+                                $downloadSuccess = $true
+                            }
+                        } catch {}
+                    }
+                    if (-not $downloadSuccess) {
+                        try {
+                            $wc = New-Object System.Net.WebClient
+                            $wc.DownloadFile($apkAsset.browser_download_url, $downloadTarget)
+                            if ((Test-Path $downloadTarget) -and (Get-Item $downloadTarget).Length -gt 10MB) {
+                                $downloadSuccess = $true
+                            }
+                        } catch {}
+                    }
+                    if (-not $downloadSuccess) {
+                        $oldProgress = $ProgressPreference
+                        $ProgressPreference = 'SilentlyContinue'
+                        try {
+                            Invoke-WebRequest -Uri $apkAsset.browser_download_url -OutFile $downloadTarget -UseBasicParsing
+                        } finally {
+                            $ProgressPreference = $oldProgress
+                        }
+                    }
                     if (Test-Path $downloadTarget) {
                         $targetApk = $downloadTarget
                         Write-Success "Downloaded release APK: $targetApk"
@@ -522,56 +548,58 @@ function Invoke-NuvioWsaDeployer {
     Write-Success "Active Package ID: $packageId"
 
     # -----------------------------------------------------------------
-    # 5.1 Auto-Configure Streaming Presets (Public Open-Source Cinemeta)
+    # 5.1 Streaming Configuration (Preserves Existing Data / Seeds Fresh Setup)
     # -----------------------------------------------------------------
     if (-not $SkipPresetConfig) {
-        Write-Info "Provisioning standard streaming catalog configuration..."
+        Write-Info "Checking streaming catalog configuration..."
         try {
-            $presetSourceDir = $null
-            if ($PresetDir -and (Test-Path $PresetDir)) {
-                $presetSourceDir = (Resolve-Path $PresetDir).Path
-            } elseif (Test-Path "$scriptBase\..\presets\$packageId") {
-                $presetSourceDir = (Resolve-Path "$scriptBase\..\presets\$packageId").Path
-            } elseif (Test-Path "$scriptBase\presets\$packageId") {
-                $presetSourceDir = (Resolve-Path "$scriptBase\presets\$packageId").Path
+            $hasExistingAddons = $false
+            $checkAddons = (& $adbExecutable -s $adbHost shell "run-as $packageId ls /data/data/$packageId/shared_prefs/nuvio_addons.xml" 2>$null) | Out-String
+            if ($checkAddons -match "nuvio_addons\.xml") {
+                $hasExistingAddons = $true
             }
 
-            if ($presetSourceDir) {
-                $xmlFiles = Get-ChildItem -Path $presetSourceDir -Filter "*.xml"
-                foreach ($xml in $xmlFiles) {
-                    $tmpTarget = "/data/local/tmp/$($xml.Name)"
-                    & $adbExecutable -s $adbHost push "$($xml.FullName)" "$tmpTarget" 2>$null | Out-Null
-                    & $adbExecutable -s $adbHost shell "run-as $packageId cp $tmpTarget /data/data/$packageId/shared_prefs/$($xml.Name) && run-as $packageId chmod 660 /data/data/$packageId/shared_prefs/$($xml.Name)" 2>$null | Out-Null
-                    & $adbExecutable -s $adbHost shell "rm $tmpTarget" 2>$null | Out-Null
-                }
-                Write-Success "Loaded streaming catalog presets from: $presetSourceDir"
+            if ($hasExistingAddons) {
+                Write-Success "Existing streaming configuration detected. Preserving personal addons and watch history!"
             } else {
-                # Generate clean, privacy-safe Cinemeta catalog preset on the fly
-                $cleanAddonsXml = @"
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="installed_manifest_urls_1">https://v3-cinemeta.strem.io/manifest.json</string>
-    <string name="installed_manifest_enabled_states_1">https://v3-cinemeta.strem.io/manifest.json&#9;true</string>
-</map>
-"@
-                $cleanPlayerXml = @"
-<?xml version='1.0' encoding='utf-8' standalone='yes' ?>
-<map>
-    <string name="resize_mode_1">Auto</string>
-</map>
-"@
-                $tempAddonsFile = "$env:TEMP\nuvio_addons_init.xml"
-                $tempPlayerFile = "$env:TEMP\nuvio_player_init.xml"
-                Set-Content -Path $tempAddonsFile -Value $cleanAddonsXml -Encoding UTF8
-                Set-Content -Path $tempPlayerFile -Value $cleanPlayerXml -Encoding UTF8
+                Write-Info "Provisioning standard streaming catalog configuration..."
+                $presetSourceDir = $null
+                if ($PresetDir -and (Test-Path $PresetDir)) {
+                    $presetSourceDir = (Resolve-Path $PresetDir).Path
+                } elseif (Test-Path "$scriptBase\..\presets\$packageId") {
+                    $presetSourceDir = (Resolve-Path "$scriptBase\..\presets\$packageId").Path
+                } elseif (Test-Path "$scriptBase\presets\$packageId") {
+                    $presetSourceDir = (Resolve-Path "$scriptBase\presets\$packageId").Path
+                }
 
-                & $adbExecutable -s $adbHost push "$tempAddonsFile" "/data/local/tmp/nuvio_addons.xml" 2>$null | Out-Null
-                & $adbExecutable -s $adbHost push "$tempPlayerFile" "/data/local/tmp/nuvio_player_settings.xml" 2>$null | Out-Null
-                & $adbExecutable -s $adbHost shell "run-as $packageId cp /data/local/tmp/nuvio_addons.xml /data/data/$packageId/shared_prefs/nuvio_addons.xml && run-as $packageId cp /data/local/tmp/nuvio_player_settings.xml /data/data/$packageId/shared_prefs/nuvio_player_settings.xml" 2>$null | Out-Null
-                & $adbExecutable -s $adbHost shell "rm /data/local/tmp/nuvio_addons.xml /data/local/tmp/nuvio_player_settings.xml" 2>$null | Out-Null
+                if ($presetSourceDir) {
+                    $xmlFiles = Get-ChildItem -Path $presetSourceDir -Filter "*.xml"
+                    foreach ($xml in $xmlFiles) {
+                        $tmpTarget = "/data/local/tmp/$($xml.Name)"
+                        & $adbExecutable -s $adbHost push "$($xml.FullName)" "$tmpTarget" 2>$null | Out-Null
+                        & $adbExecutable -s $adbHost shell "run-as $packageId cp $tmpTarget /data/data/$packageId/shared_prefs/$($xml.Name) && run-as $packageId chmod 660 /data/data/$packageId/shared_prefs/$($xml.Name)" 2>$null | Out-Null
+                        & $adbExecutable -s $adbHost shell "rm $tmpTarget" 2>$null | Out-Null
+                    }
+                    Write-Success "Loaded streaming catalog presets from: $presetSourceDir"
+                } else {
+                    # Generate clean, privacy-safe Cinemeta catalog preset on the fly without BOM
+                    $cleanAddonsXml = "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>`n<map>`n    <string name=`"installed_manifest_urls_1`">https://v3-cinemeta.strem.io/manifest.json</string>`n    <string name=`"installed_manifest_enabled_states_1`">https://v3-cinemeta.strem.io/manifest.json&#9;true</string>`n</map>`n"
+                    $cleanPlayerXml = "<?xml version='1.0' encoding='utf-8' standalone='yes' ?>`n<map>`n    <string name=`"resize_mode_1`">Auto</string>`n</map>`n"
+                    $tempAddonsFile = "$env:TEMP\nuvio_addons_init.xml"
+                    $tempPlayerFile = "$env:TEMP\nuvio_player_init.xml"
+                    
+                    $utf8NoBom = New-Object System.Text.UTF8Encoding($false)
+                    [System.IO.File]::WriteAllText($tempAddonsFile, $cleanAddonsXml, $utf8NoBom)
+                    [System.IO.File]::WriteAllText($tempPlayerFile, $cleanPlayerXml, $utf8NoBom)
 
-                Remove-Item -Path $tempAddonsFile, $tempPlayerFile -Force -ErrorAction SilentlyContinue
-                Write-Success "Standard open-source catalog (Stremio Cinemeta) provisioned."
+                    & $adbExecutable -s $adbHost push "$tempAddonsFile" "/data/local/tmp/nuvio_addons.xml" 2>$null | Out-Null
+                    & $adbExecutable -s $adbHost push "$tempPlayerFile" "/data/local/tmp/nuvio_player_settings.xml" 2>$null | Out-Null
+                    & $adbExecutable -s $adbHost shell "run-as $packageId cp /data/local/tmp/nuvio_addons.xml /data/data/$packageId/shared_prefs/nuvio_addons.xml && run-as $packageId cp /data/local/tmp/nuvio_player_settings.xml /data/data/$packageId/shared_prefs/nuvio_player_settings.xml && run-as $packageId chmod 660 /data/data/$packageId/shared_prefs/nuvio_addons.xml /data/data/$packageId/shared_prefs/nuvio_player_settings.xml" 2>$null | Out-Null
+                    & $adbExecutable -s $adbHost shell "rm /data/local/tmp/nuvio_addons.xml /data/local/tmp/nuvio_player_settings.xml" 2>$null | Out-Null
+
+                    Remove-Item -Path $tempAddonsFile, $tempPlayerFile -Force -ErrorAction SilentlyContinue
+                    Write-Success "Standard open-source catalog (Stremio Cinemeta) provisioned."
+                }
             }
         } catch {
             Write-Warn "Could not apply default catalog presets: $_ (App will start with defaults)"
@@ -622,7 +650,8 @@ function Invoke-NuvioWsaDeployer {
         Write-Warn "If video streaming exhibits playback stuttering, a one-time PC reboot will activate hardware acceleration."
     }
 
-    if ([Environment]::UserInteractive -and -not $NonInteractive -and $Host.Name -notmatch "Default Host") {
+        $isAutomated = $NonInteractive -or $env:NON_INTERACTIVE -or $env:CI -or [Console]::IsInputRedirected
+    if ([Environment]::UserInteractive -and -not $isAutomated -and $Host.Name -notmatch "Default Host") {
         try {
             Write-Host "Press any key to close this installer..." -ForegroundColor DarkGray
             $null = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyDown')
