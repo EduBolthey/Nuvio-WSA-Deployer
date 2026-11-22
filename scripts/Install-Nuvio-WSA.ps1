@@ -274,6 +274,15 @@ function Invoke-NuvioWsaDeployer {
     # -----------------------------------------------------------------
     Write-Step 3 $TOTAL_STEPS "Verifying Windows Subsystem for Android (WSA)..."
 
+    # Pre-enable WSA Developer Mode (ADB debugging) in registry
+    try {
+        $wsaRegKey = "HKCU:\Software\Microsoft\WSA"
+        if (-not (Test-Path $wsaRegKey)) {
+            New-Item -Path $wsaRegKey -Force | Out-Null
+        }
+        Set-ItemProperty -Path $wsaRegKey -Name "DeveloperModeEnabled" -Value 1 -Type DWord -Force -ErrorAction SilentlyContinue
+    } catch {}
+
     $wsaPackage = Get-AppxPackage -Name "*WindowsSubsystemForAndroid*" -ErrorAction SilentlyContinue
 
     if ($wsaPackage) {
@@ -281,7 +290,7 @@ function Invoke-NuvioWsaDeployer {
     } elseif ($SkipWsaInstall) {
         Write-Warn "WSA installation skipped by parameter."
     } else {
-        Write-Info "WSA is not installed. Searching for WSA package sources..."
+        Write-Info "WSA is not installed. Searching for local WSA builds..."
 
         # Look for local WSA builds
         $possibleWsaDirs = @(
@@ -310,7 +319,7 @@ function Invoke-NuvioWsaDeployer {
 
             if ($archives -and (Test-Path $archives)) {
                 Write-Info "Found local WSA archive: $archives. Extracting..."
-                $extractTarget = "$env:ProgramFiles\WindowsSubsystemForAndroid"
+                $extractTarget = "$env:SystemDrive\WSA"
                 if (-not (Test-Path $extractTarget)) {
                     New-Item -ItemType Directory -Path $extractTarget -Force | Out-Null
                 }
@@ -319,28 +328,183 @@ function Invoke-NuvioWsaDeployer {
                 } else {
                     tar -xf "$archives" -C "$extractTarget" 2>$null
                 }
-                if (Test-Path "$extractTarget\AppxManifest.xml") {
-                    $wsaDir = $extractTarget
+                $found = Get-ChildItem -Path $extractTarget -Filter "AppxManifest.xml" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+                if ($found) {
+                    $wsaDir = $found.DirectoryName
                 }
             }
         }
 
-        # If still not found, provide download instructions
+        # Auto-download pre-built WSA release if not found locally
         if (-not $wsaDir) {
-            Write-Err "No local WSA installation package found!"
-            Write-Info "You can download a clean pre-built WSA release (x64 / arm64) from:"
-            Write-Host "   https://github.com/Mustafacank/WSABuilds/releases" -ForegroundColor Cyan
-            Write-Info "Extract the WSA archive into a folder named 'WSA' and re-run this script."
-            if ([Environment]::UserInteractive -and -not $NonInteractive) { pause }
-            return
+            Write-Info "No local WSA package detected. Auto-downloading optimized WSA build..."
+
+            $arch = "x64"
+            if ([Environment]::Is64BitOperatingSystem) {
+                if ($env:PROCESSOR_ARCHITECTURE -match "ARM") { $arch = "arm64" }
+            } else {
+                $arch = "x86"
+            }
+
+            $wsaTargetDir = "$env:SystemDrive\WSA"
+            if (-not (Test-Path $wsaTargetDir)) {
+                New-Item -ItemType Directory -Path $wsaTargetDir -Force | Out-Null
+            }
+
+            $wsaArchiveTarget = "$env:TEMP\WSA_Build_$arch.7z"
+            $wsaDownloadUrl = $null
+            $wsaReleaseRepo = "MustardChef/WSABuilds"
+
+            # 1. Query GitHub API for latest release assets
+            try {
+                [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 -bor [Net.SecurityProtocolType]::Tls13
+                Write-Info "Querying $wsaReleaseRepo for latest $arch build..."
+                $apiReleases = Invoke-RestMethod -Uri "https://api.github.com/repos/$wsaReleaseRepo/releases?per_page=5" -Headers @{"User-Agent"="PowerShell"} -ErrorAction Stop
+
+                foreach ($rel in $apiReleases) {
+                    $matchingAssets = $rel.assets | Where-Object { $_.name -like "*$arch*.7z" }
+                    if ($matchingAssets) {
+                        $best = $matchingAssets | Where-Object { $_.name -like "*NoGApps*NoAmazon*" } | Select-Object -First 1
+                        if (-not $best) {
+                            $best = $matchingAssets | Where-Object { $_.name -like "*NoAmazon*" } | Select-Object -First 1
+                        }
+                        if (-not $best) {
+                            $best = $matchingAssets | Select-Object -First 1
+                        }
+                        if ($best) {
+                            $wsaDownloadUrl = $best.browser_download_url
+                            Write-Success "Found WSA release: $($best.name) ($([math]::Round($best.size/1MB, 1)) MB)"
+                            break
+                        }
+                    }
+                }
+            } catch {
+                Write-Warn "GitHub API query bypassed: $_"
+            }
+
+            # 2. Resilient verified fallback URL if API call is rate-limited
+            if (-not $wsaDownloadUrl) {
+                if ($arch -eq "arm64") {
+                    $wsaDownloadUrl = "https://github.com/MustardChef/WSABuilds/releases/download/Windows_11_2407.40000.4.0_LTS_8_arm64/WSA_2407.40000.4.0_arm64_Release-Nightly-NoGApps-NoAmazon.7z"
+                } else {
+                    $wsaDownloadUrl = "https://github.com/MustardChef/WSABuilds/releases/download/Windows_11_2407.40000.4.0_LTS_8/WSA_2407.40000.4.0_x64_Release-Nightly-NoGApps-NoAmazon.7z"
+                }
+                Write-Info "Using verified direct WSA download endpoint: $wsaDownloadUrl"
+            }
+
+            # 3. High-speed download with curl.exe progress bar
+            Write-Info "Downloading Windows Subsystem for Android (~500 MB)..."
+            $downloadSuccess = $false
+            if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                try {
+                    & curl.exe -L -k --progress-bar -o "$wsaArchiveTarget" "$wsaDownloadUrl"
+                    if ((Test-Path $wsaArchiveTarget) -and (Get-Item $wsaArchiveTarget).Length -gt 100MB) {
+                        $downloadSuccess = $true
+                    }
+                } catch {}
+            }
+
+            if (-not $downloadSuccess) {
+                try {
+                    $wc = New-Object System.Net.WebClient
+                    $wc.DownloadFile($wsaDownloadUrl, $wsaArchiveTarget)
+                    if ((Test-Path $wsaArchiveTarget) -and (Get-Item $wsaArchiveTarget).Length -gt 100MB) {
+                        $downloadSuccess = $true
+                    }
+                } catch {}
+            }
+
+            if (-not $downloadSuccess) {
+                $oldProgress = $ProgressPreference
+                $ProgressPreference = 'SilentlyContinue'
+                try {
+                    Invoke-WebRequest -Uri $wsaDownloadUrl -OutFile $wsaArchiveTarget -UseBasicParsing
+                    if ((Test-Path $wsaArchiveTarget) -and (Get-Item $wsaArchiveTarget).Length -gt 100MB) {
+                        $downloadSuccess = $true
+                    }
+                } finally {
+                    $ProgressPreference = $oldProgress
+                }
+            }
+
+            if (-not (Test-Path $wsaArchiveTarget) -or (Get-Item $wsaArchiveTarget).Length -lt 100MB) {
+                Write-Err "Failed to download WSA archive from $wsaDownloadUrl"
+                if ([Environment]::UserInteractive -and -not $isAutomated) { pause }
+                return
+            }
+
+            $wsaArchiveSize = [math]::Round(((Get-Item $wsaArchiveTarget).Length / 1MB), 1)
+            Write-Success "WSA package downloaded successfully ($wsaArchiveSize MB)."
+
+            # 4. Extract archive using available tool or standalone 7zr.exe
+            Write-Info "Extracting WSA into '$wsaTargetDir'..."
+            $extractor = $null
+            if (Get-Command "7z.exe" -ErrorAction SilentlyContinue) {
+                $extractor = (Get-Command "7z.exe").Source
+            } elseif (Test-Path "$env:ProgramFiles\7-Zip\7z.exe") {
+                $extractor = "$env:ProgramFiles\7-Zip\7z.exe"
+            } elseif (Test-Path "${env:ProgramFiles(x86)}\7-Zip\7z.exe") {
+                $extractor = "${env:ProgramFiles(x86)}\7-Zip\7z.exe"
+            }
+
+            if ($extractor) {
+                & $extractor x "$wsaArchiveTarget" "-o$wsaTargetDir" -y | Out-Null
+            } else {
+                $tarExtracted = $false
+                if (Get-Command "tar.exe" -ErrorAction SilentlyContinue) {
+                    try {
+                        tar -xf "$wsaArchiveTarget" -C "$wsaTargetDir" 2>$null
+                        if (Get-ChildItem -Path $wsaTargetDir -Filter "AppxManifest.xml" -Recurse -Depth 2 -ErrorAction SilentlyContinue) {
+                            $tarExtracted = $true
+                        }
+                    } catch {}
+                }
+
+                if (-not $tarExtracted) {
+                    Write-Info "Acquiring lightweight 7z unpacker..."
+                    $7zrExe = "$env:TEMP\7zr.exe"
+                    try {
+                        if (Get-Command curl.exe -ErrorAction SilentlyContinue) {
+                            & curl.exe -L -s -k -o "$7zrExe" "https://www.7-zip.org/a/7zr.exe"
+                        } else {
+                            (New-Object System.Net.WebClient).DownloadFile("https://www.7-zip.org/a/7zr.exe", $7zrExe)
+                        }
+                        if (Test-Path $7zrExe) {
+                            & $7zrExe x "$wsaArchiveTarget" "-o$wsaTargetDir" -y | Out-Null
+                            Remove-Item $7zrExe -Force -ErrorAction SilentlyContinue
+                        }
+                    } catch {
+                        Write-Warn "Could not auto-extract with 7zr: $_"
+                    }
+                }
+            }
+
+            Remove-Item $wsaArchiveTarget -Force -ErrorAction SilentlyContinue
+
+            $foundManifest = Get-ChildItem -Path $wsaTargetDir -Filter "AppxManifest.xml" -Recurse -Depth 2 -ErrorAction SilentlyContinue | Select-Object -First 1
+            if ($foundManifest) {
+                $wsaDir = $foundManifest.DirectoryName
+                Write-Success "Extracted WSA build package to: $wsaDir"
+            } else {
+                Write-Err "Could not find AppxManifest.xml in $wsaTargetDir after extraction!"
+                if ([Environment]::UserInteractive -and -not $isAutomated) { pause }
+                return
+            }
         }
 
         Write-Success "Found WSA package at: $wsaDir"
 
-        # Install required Appx Dependencies if present
+        # Install required Appx / MSIX Dependencies recursively
         Write-Info "Checking and registering MSIX/Appx dependencies..."
-        $depFiles = Get-ChildItem -Path $wsaDir -Filter "*.appx" -ErrorAction SilentlyContinue
+        $depFiles = Get-ChildItem -Path $wsaDir -Filter "*.appx" -Recurse -ErrorAction SilentlyContinue
         foreach ($dep in $depFiles) {
+            try {
+                Add-AppxPackage -Path $dep.FullName -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction SilentlyContinue
+                Write-Success "Installed dependency: $($dep.Name)"
+            } catch {}
+        }
+        $msixFiles = Get-ChildItem -Path $wsaDir -Filter "*.msix" -Recurse -ErrorAction SilentlyContinue
+        foreach ($dep in $msixFiles) {
             try {
                 Add-AppxPackage -Path $dep.FullName -ForceApplicationShutdown -ForceUpdateFromAnyVersion -ErrorAction SilentlyContinue
                 Write-Success "Installed dependency: $($dep.Name)"
@@ -360,7 +524,7 @@ function Invoke-NuvioWsaDeployer {
             }
         } catch {
             Write-Err "Failed to register WSA: $_"
-            if ([Environment]::UserInteractive -and -not $NonInteractive) { pause }
+            if ([Environment]::UserInteractive -and -not $isAutomated) { pause }
             return
         }
     }
@@ -408,14 +572,26 @@ function Invoke-NuvioWsaDeployer {
         Start-Sleep -Seconds 2
     }
 
-    if (-not $connected) {
-        Write-Host ""
-        Write-Err "Could not connect to WSA ADB on $adbHost within timeout."
-        Write-Warn "Please check:"
-        Write-Warn "1. Is Developer Mode enabled in Windows Subsystem for Android Settings?"
-        Write-Warn "2. If this is a fresh setup and Virtual Machine Platform was just enabled, a PC restart is required."
-        if ([Environment]::UserInteractive -and -not $NonInteractive) { pause }
-        return
+        if (-not $connected) { 
+        Write-Host "" 
+        Write-Err "Could not connect to WSA ADB on $adbHost within timeout." 
+        if ($needsReboot) {
+            Write-Host ""
+            Write-Warn "======================================================================"
+            Write-Warn "  ACTION REQUIRED: ONE-TIME PC RESTART"
+            Write-Warn "  Windows Virtual Machine Platform was newly enabled on this machine."
+            Write-Warn "  Windows requires a computer restart to load the virtualization hypervisor."
+            Write-Warn "  After restarting, simply run the one-liner command again:"
+            Write-Warn "    irm https://raw.githubusercontent.com/EduBolthey/Nuvio-WSA-Deployer/main/scripts/Install-Nuvio-WSA.ps1 | iex"
+            Write-Warn "  WSA is already installed and ready; it will boot instantly after restart!"
+            Write-Warn "======================================================================"
+        } else {
+            Write-Warn "Please check:" 
+            Write-Warn "1. In WSA Settings -> 'Developer' -> ensure 'Developer mode' is toggled ON." 
+            Write-Warn "2. If your motherboard has AMD SVM or Intel VT-x disabled in BIOS, please enable it." 
+        }
+        if ([Environment]::UserInteractive -and -not $isAutomated) { pause } 
+        return 
     }
 
     # Fetch Android specs from WSA
