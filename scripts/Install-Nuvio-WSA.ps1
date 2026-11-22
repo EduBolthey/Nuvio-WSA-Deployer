@@ -134,15 +134,25 @@ function Invoke-NuvioWsaDeployer {
     # 1.2 CPU Virtualization Hardware Check (BIOS)
     try {
         $cpu = Get-CimInstance Win32_Processor | Select-Object -First 1
-        if ($cpu.VirtualizationFirmwareEnabled -eq $false) {
-            Write-Warn "Hardware Virtualization (VT-x / AMD-V) appears DISABLED in motherboard BIOS."
-            Write-Warn "Please enable 'Intel Virtualization Technology' or 'AMD SVM' in your BIOS/UEFI if WSA fails to boot."
-        } else {
+        $cs = Get-CimInstance Win32_ComputerSystem -ErrorAction SilentlyContinue
+        $isHypervisorPresent = if ($cs) { $cs.HypervisorPresent } else { $false }
+
+        if ($isHypervisorPresent) {
+            Write-Success "Windows Hypervisor is active and running."
+        } elseif ($cpu.VirtualizationFirmwareEnabled -eq $true) {
             Write-Success "CPU Hardware Virtualization is enabled in BIOS."
+        } else {
+            Write-Warn "Hardware Virtualization (VT-x / AMD-V) appears DISABLED or uninitialized in BIOS."
+            Write-Warn "If this is a fresh setup, a PC restart is required to load the hypervisor."
+            Write-Warn "If WSA fails to boot after restart, enable 'Virtualization Technology' (VTx / SVM) in your BIOS."
         }
     } catch {
         Write-Info "Could not query BIOS virtualization status directly; continuing..."
     }
+
+    try {
+        & bcdedit /set hypervisorlaunchtype auto 2>$null | Out-Null
+    } catch {}
 
     # 1.3 Windows Features: VirtualMachinePlatform & HypervisorPlatform
     try {
@@ -575,22 +585,30 @@ function Invoke-NuvioWsaDeployer {
         if (-not $connected) { 
         Write-Host "" 
         Write-Err "Could not connect to WSA ADB on $adbHost within timeout." 
-        if ($needsReboot) {
+        Write-Host ""
+        Write-Warn "======================================================================"
+        Write-Warn "  ACTION REQUIRED: RESTART LAPTOP TO ACTIVATE VIRTUALIZATION"
+        Write-Warn "======================================================================"
+        Write-Warn "  1. Windows Virtual Machine Platform was recently enabled and requires"
+        Write-Warn "     a PC restart to load the virtualization hypervisor into memory."
+        Write-Warn "  2. If hardware virtualization is disabled in your laptop's BIOS:"
+        Write-Warn "     - HP Laptops: Press F10 or ESC at boot -> Advanced / Configuration"
+        Write-Warn "       -> Virtualization Technology (VTx / SVM) -> Enabled."
+        Write-Warn "  3. WSA and ADB are ALREADY INSTALLED on your laptop! After restarting,"
+        Write-Warn "     simply re-run the one-liner command to instantly launch Nuvio Debug:"
+        Write-Warn "     irm https://raw.githubusercontent.com/EduBolthey/Nuvio-WSA-Deployer/main/scripts/Install-Nuvio-WSA.ps1 | iex"
+        Write-Warn "======================================================================"
+
+        if ([Environment]::UserInteractive -and -not $isAutomated) {
             Write-Host ""
-            Write-Warn "======================================================================"
-            Write-Warn "  ACTION REQUIRED: ONE-TIME PC RESTART"
-            Write-Warn "  Windows Virtual Machine Platform was newly enabled on this machine."
-            Write-Warn "  Windows requires a computer restart to load the virtualization hypervisor."
-            Write-Warn "  After restarting, simply run the one-liner command again:"
-            Write-Warn "    irm https://raw.githubusercontent.com/EduBolthey/Nuvio-WSA-Deployer/main/scripts/Install-Nuvio-WSA.ps1 | iex"
-            Write-Warn "  WSA is already installed and ready; it will boot instantly after restart!"
-            Write-Warn "======================================================================"
-        } else {
-            Write-Warn "Please check:" 
-            Write-Warn "1. In WSA Settings -> 'Developer' -> ensure 'Developer mode' is toggled ON." 
-            Write-Warn "2. If your motherboard has AMD SVM or Intel VT-x disabled in BIOS, please enable it." 
+            Write-Host "Would you like to restart your laptop now? [Y/N]: " -ForegroundColor Cyan -NoNewline
+            $choice = Read-Host
+            if ($choice -match "^[Yy]") {
+                Write-Info "Restarting computer in 5 seconds..."
+                Start-Sleep -Seconds 3
+                Restart-Computer -Force
+            }
         }
-        if ([Environment]::UserInteractive -and -not $isAutomated) { pause } 
         return 
     }
 
